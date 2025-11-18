@@ -1,6 +1,8 @@
 using System.Collections;
 using System.Collections.Generic;
+#if UNITY_EDITOR
 using UnityEditor;
+#endif
 using UnityEngine;
 
 public class RingWorldGenerator : MonoBehaviour
@@ -72,6 +74,37 @@ public class RingWorldGenerator : MonoBehaviour
     [Range(0, 100)]
     public float regionTextureScale;
 
+    [Header("Erosion Settings")]
+    public HydraulicErosionSettings hydraulicErosion = new HydraulicErosionSettings();
+    public ThermalErosionSettings thermalErosion = new ThermalErosionSettings();
+    
+    [Header("Quadtree LOD Settings")]
+    [Tooltip("Use quadtree-based adaptive LOD (enables dynamic chunk subdivision)")]
+    public bool useQuadtreeLOD = false;
+    
+    [Tooltip("Maximum depth of quadtree subdivision")]
+    [Range(0, 6)]
+    public int maxQuadtreeDepth = 3;
+    
+    [Tooltip("Distance at which chunks subdivide for more detail")]
+    [Range(100f, 5000f)]
+    public float subdivisionDistance = 500f;
+    
+    [Tooltip("Distance at which chunks merge back (should be larger than subdivision)")]
+    [Range(200f, 10000f)]
+    public float mergeDistance = 1000f;
+    
+    [Tooltip("How often to update LOD (in seconds)")]
+    [Range(0.1f, 2f)]
+    public float lodUpdateInterval = 0.2f;
+    
+    [Header("Debug Visualization")]
+    [Tooltip("Show quadtree chunk boundaries in Scene view")]
+    public bool showDebugBounds = false;
+    
+    [Tooltip("Show LOD level colors")]
+    public bool showLODColors = true;
+
     [Header("Details")]
     public bool autoUpdate;
 
@@ -96,6 +129,9 @@ public class RingWorldGenerator : MonoBehaviour
     public GameObject player; // Reference to the player GameObject
 
     public float proximityThreshold = 300f;
+    
+    // Quadtree root chunks
+    private List<TerrainQuadtreeChunk> quadtreeRoots = new List<TerrainQuadtreeChunk>();
 
     private void Awake()
     { 
@@ -135,13 +171,59 @@ public class RingWorldGenerator : MonoBehaviour
         // Calculate index counts for a single segment
         int segmentIndexCount = segmentXVertices * (segmentYVertices - 1) * 6;
 
-        // Create segments within the specified range
+        if (useQuadtreeLOD)
+        {
+            // Use quadtree-based chunk management
+            GenerateQuadtreeChunks();
+        }
+        else
+        {
+            // Use traditional grid-based chunks
+            // Create segments within the specified range
+            for (int i = Mathf.Max(0, minSegmentIndex); i <= Mathf.Min(NumberOfCircumferenceChunks - 1, maxSegmentIndex); i++)
+            {
+                for (int j = Mathf.Max(0, minSegmentIndex); j <= Mathf.Min(NumberOfWidthChunks - 1, maxSegmentIndex); j++)
+                {
+                    var segmentObject = CreateSegment(null, i, j, segmentIndexCount, levelOfDetail, meshLevelOfDetail);
+                    createdSegments.Add(segmentObject); // Add the created segment to the list
+                }
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Generate terrain using quadtree-based chunk management
+    /// </summary>
+    private void GenerateQuadtreeChunks()
+    {
+        quadtreeRoots.Clear();
+        
+        // Create root chunks for the ring world
         for (int i = Mathf.Max(0, minSegmentIndex); i <= Mathf.Min(NumberOfCircumferenceChunks - 1, maxSegmentIndex); i++)
         {
             for (int j = Mathf.Max(0, minSegmentIndex); j <= Mathf.Min(NumberOfWidthChunks - 1, maxSegmentIndex); j++)
             {
-                var segmentObject = CreateSegment(null, i, j, segmentIndexCount, levelOfDetail, meshLevelOfDetail);
-                createdSegments.Add(segmentObject); // Add the created segment to the list
+                GameObject rootObj = new GameObject($"QuadRoot_C{i}_W{j}");
+                rootObj.transform.SetParent(segmentsParent.transform, false);
+                
+                TerrainQuadtreeChunk rootChunk = rootObj.AddComponent<TerrainQuadtreeChunk>();
+                rootChunk.Initialize(
+                    this,
+                    null,
+                    0, // depth
+                    maxQuadtreeDepth,
+                    i, i + 1, // circumference range
+                    j, j + 1, // width range
+                    NumberOfCircumferenceChunks,
+                    NumberOfWidthChunks,
+                    i, // circumference index
+                    j  // width index
+                );
+                
+                // Generate initial mesh
+                rootChunk.GenerateMesh();
+                
+                quadtreeRoots.Add(rootChunk);
             }
         }
     }
@@ -240,7 +322,14 @@ public class RingWorldGenerator : MonoBehaviour
 
     private void Start()
     {
-        StartCoroutine(CheckPlayerProximityRoutine());
+        if (useQuadtreeLOD)
+        {
+            StartCoroutine(UpdateQuadtreeLODRoutine());
+        }
+        else
+        {
+            StartCoroutine(CheckPlayerProximityRoutine());
+        }
     }
 
     private IEnumerator CheckPlayerProximityRoutine()
@@ -285,6 +374,53 @@ public class RingWorldGenerator : MonoBehaviour
                         haloSegment.SplitChunk();
                     }
                 }
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Update quadtree LOD based on player position
+    /// </summary>
+    private IEnumerator UpdateQuadtreeLODRoutine()
+    {
+        while (true)
+        {
+            if (player != null && useQuadtreeLOD)
+            {
+                UpdateQuadtreeLOD();
+            }
+            yield return new WaitForSeconds(lodUpdateInterval);
+        }
+    }
+    
+    private void UpdateQuadtreeLOD()
+    {
+        Vector3 playerPosition = player.transform.position;
+        
+        foreach (var root in quadtreeRoots)
+        {
+            if (root != null)
+            {
+                root.UpdateLOD(playerPosition, subdivisionDistance, mergeDistance);
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Draw debug gizmos for quadtree visualization
+    /// </summary>
+    private void OnDrawGizmos()
+    {
+        if (!showDebugBounds || !useQuadtreeLOD || quadtreeRoots == null)
+        {
+            return;
+        }
+        
+        foreach (var root in quadtreeRoots)
+        {
+            if (root != null)
+            {
+                root.DrawDebugGizmos();
             }
         }
     }
